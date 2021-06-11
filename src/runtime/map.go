@@ -379,8 +379,13 @@ func makeBucketArray(t *maptype, b uint8, dirtyalloc unsafe.Pointer) (buckets un
 		// we use the convention that if a preallocated overflow bucket's overflow
 		// pointer is nil, then there are more available by bumping the pointer.
 		// We need a safe non-nil pointer for the last overflow bucket; just use buckets.
+
+		// 把超出bass的额外申请的buckets给nextOverflow，用于外面分配给mapextra
 		nextOverflow = (*bmap)(add(buckets, base*uintptr(t.bucketsize)))
+		// last定位于最后一个bucket
 		last := (*bmap)(add(buckets, (nbuckets-1)*uintptr(t.bucketsize)))
+		// 通过指针偏移，获取最后一个bucket（bmap）的overflow指针，将它指向空闲的bucket（目前是第一个）。
+		// 是为了将来判断是否还有空的bucket 可以让溢出的bucket空间使用
 		last.setoverflow(t, (*bmap)(buckets))
 	}
 	return buckets, nextOverflow

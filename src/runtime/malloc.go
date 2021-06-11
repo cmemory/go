@@ -13,17 +13,26 @@
 // has its own free set of objects of exactly that size.
 // Any free page of memory can be split into a set of objects
 // of one size class, which are then managed using a free bitmap.
+// <= 32k 的被划分为70种不同大小的类型，每种大小类型都有对应自己大小的空闲对象集合。
+// 针对每种大小类型，内存中的空闲页都可以划分成一系列的小的存储对象，这些对象使用空闲位图来管理。
 //
 // The allocator's data structures are:
 //
+//  固定大小的堆外存储对象的空闲链表分配器，管理分配器所使用的内存
 //	fixalloc: a free-list allocator for fixed-size off-heap objects,
 //		used to manage storage used by the allocator.
+//  动态分配的堆内存，以页为单位管理
 //	mheap: the malloc heap, managed at page (8192-byte) granularity.
+//  一组被mheap管理的使用中的pages
 //	mspan: a run of in-use pages managed by the mheap.
+//  集中管理固定大小类型上的所有spans
 //	mcentral: collects all spans of a given size class.
+//  P(协程)级别的缓存，空闲的mspans
 //	mcache: a per-P cache of mspans with free space.
+//  分配的统计
 //	mstats: allocation statistics.
 //
+// 分层缓存上小对象分配的处理
 // Allocating a small object proceeds up a hierarchy of caches:
 //
 //	1. Round the size up to one of the small size classes

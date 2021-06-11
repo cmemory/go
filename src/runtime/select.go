@@ -159,6 +159,7 @@ func selectgo(cas0 *scase, order0 *uint16, pc0 *uintptr, nsends, nrecvs int, blo
 			continue
 		}
 
+		// 随机排序，0...i取一个随机数，将该处元素与当前元素交换
 		j := fastrandn(uint32(norder + 1))
 		pollorder[norder] = pollorder[j]
 		pollorder[j] = uint16(i)
@@ -169,6 +170,7 @@ func selectgo(cas0 *scase, order0 *uint16, pc0 *uintptr, nsends, nrecvs int, blo
 
 	// sort the cases by Hchan address to get the locking order.
 	// simple heap sort, to guarantee n log n time and constant stack footprint.
+	// 构建大根堆
 	for i := range lockorder {
 		j := i
 		// Start with the pollorder to permute cases on the same channel.
@@ -180,6 +182,7 @@ func selectgo(cas0 *scase, order0 *uint16, pc0 *uintptr, nsends, nrecvs int, blo
 		}
 		lockorder[j] = pollorder[i]
 	}
+	// 堆排序
 	for i := len(lockorder) - 1; i >= 0; i-- {
 		o := lockorder[i]
 		c := scases[o].c
@@ -213,6 +216,8 @@ func selectgo(cas0 *scase, order0 *uint16, pc0 *uintptr, nsends, nrecvs int, blo
 	}
 
 	// lock all the channels involved in the select
+	// 所有channel加锁，相同的地址只会第一个加锁。
+	// 后面释放锁的顺序与加锁顺序一致
 	sellock(scases, lockorder)
 
 	var (
@@ -232,39 +237,51 @@ func selectgo(cas0 *scase, order0 *uint16, pc0 *uintptr, nsends, nrecvs int, blo
 	var caseSuccess bool
 	var caseReleaseTime int64 = -1
 	var recvOK bool
+	// 按前面的随顺序取出case处理
 	for _, casei := range pollorder {
 		casi = int(casei)
 		cas = &scases[casi]
 		c = cas.c
 
+		// case是receive
 		if casi >= nsends {
+			// 1、先判断该channel的send等待队列中是否有阻塞的g
+			// 有就直接从等待的中获取数据
 			sg = c.sendq.dequeue()
 			if sg != nil {
 				goto recv
 			}
+			// 2、再判断channel中是否有数据
 			if c.qcount > 0 {
 				goto bufrecv
 			}
+			// 3、然后判断channel是否close
 			if c.closed != 0 {
 				goto rclose
 			}
 		} else {
+			// case是send
 			if raceenabled {
 				racereadpc(c.raceaddr(), casePC(casi), chansendpc)
 			}
+			// 发生到close的channel，进入sclose，报panic
 			if c.closed != 0 {
 				goto sclose
 			}
+			// 如果channel的recieve队列有等待的g，直接唤醒发送过去
 			sg = c.recvq.dequeue()
 			if sg != nil {
 				goto send
 			}
+			// channel的buffer未满，加入buffer
 			if c.qcount < c.dataqsiz {
 				goto bufsend
 			}
 		}
 	}
 
+	// 遍历完成后没有可选的channel，看是否有default
+	// 有则不需要阻塞，直接释放锁返回
 	if !block {
 		selunlock(scases, lockorder)
 		casi = -1
@@ -272,8 +289,10 @@ func selectgo(cas0 *scase, order0 *uint16, pc0 *uintptr, nsends, nrecvs int, blo
 	}
 
 	// pass 2 - enqueue on all chans
+	// 需要阻塞，将当前g挂到所有chans的等待队列里
 	gp = getg()
 	if gp.waiting != nil {
+		// 如果当前g的waiting队列非空，g在等待其他g？抛异常
 		throw("gp.waiting != nil")
 	}
 	nextp = &gp.waiting
@@ -293,9 +312,11 @@ func selectgo(cas0 *scase, order0 *uint16, pc0 *uintptr, nsends, nrecvs int, blo
 		}
 		sg.c = c
 		// Construct waiting list in lock order.
+		// 构建等待的sudog 列表
 		*nextp = sg
 		nextp = &sg.waitlink
 
+		// 把sudog加入到对应channel的等待队列中
 		if casi < nsends {
 			c.sendq.enqueue(sg)
 		} else {
@@ -304,13 +325,16 @@ func selectgo(cas0 *scase, order0 *uint16, pc0 *uintptr, nsends, nrecvs int, blo
 	}
 
 	// wait for someone to wake us up
+	// 阻塞当前线程，selparkcommit里会释放之前对所有channel加的锁
 	gp.param = nil
 	gopark(selparkcommit, nil, waitReasonSelect, traceEvGoBlockSelect, 1)
 	gp.activeStackChans = false
 
+	// 重新唤醒后首先对所有channel加锁
 	sellock(scases, lockorder)
 
 	gp.selectDone = 0
+	// 其他携程唤醒的sudog，传到gp.param
 	sg = (*sudog)(gp.param)
 	gp.param = nil
 
@@ -330,6 +354,8 @@ func selectgo(cas0 *scase, order0 *uint16, pc0 *uintptr, nsends, nrecvs int, blo
 	}
 	gp.waiting = nil
 
+	// 遍历之前构建的gp.waiting列表，找到唤醒的sudog，并释放其他的sudog
+	// 按照加锁顺序释放，gp.waiting实际是一个链表头，sg.waitlink是链接。
 	for _, casei := range lockorder {
 		k = &scases[casei]
 		if sg == sglist {
@@ -527,7 +553,7 @@ func reflect_rselect(cases []runtimeSelect) (int, bool) {
 			nrecvs++
 			j = len(cases) - nrecvs
 		}
-
+		// send放前面，receive放后面
 		sel[j] = scase{c: rc.ch, elem: rc.val}
 		orig[j] = i
 	}
